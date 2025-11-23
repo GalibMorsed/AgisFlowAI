@@ -1,0 +1,3 @@
+# Add project dependencies here, for example:
+# requests>=2.0
+# For now this starter has no external dependencies.
