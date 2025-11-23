@@ -1,0 +1,1 @@
+{"fps": 23.976023976023978, "rows": 4, "cols": 4, "csv_sample_rate": 1, "note": "This file is intended for training forecasting models. Columns: frame_idx,time_s,cell_idx,density,acceleration,entropy,score,category"}

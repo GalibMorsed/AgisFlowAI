@@ -1,3 +1,9 @@
-# Add project dependencies here, for example:
-# requests>=2.0
-# For now this starter has no external dependencies.
+# Add project dependencies. Install with:
+#   pip install -r requirements.txt
+# Use a recent Python (3.11 or 3.12 recommended).
+opencv-python>=4.7.0
+numpy>=1.24
+# Optional: PyTorch required for forecasting trainer/predictor
+# Install if you plan to train models: `pip install torch` (check https://pytorch.org/)
+torch>=2.0.0
+
