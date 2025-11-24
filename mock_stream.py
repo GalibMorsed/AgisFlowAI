@@ -1,0 +1,305 @@
+# mock_stream.py
+import cv2
+import numpy as np
+import csv
+import time
+import argparse
+import sys
+from pathlib import Path
+
+# Ensure the project root is on the Python path
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+try:
+    from src.detector import YOLOv8PersonDetector
+    from src.tracker import MultiObjectTracker
+    from src.pipeline import (
+        make_grid,
+        bbox_center_to_cell,
+        angles_from_flow,
+        direction_histogram,
+        normalized_entropy,
+        normalize_feature,
+        instability_score,
+    )
+except ImportError as e:
+    print(f"Error importing detector: {e}")
+    print("Please ensure 'ultralytics' is installed (`pip install ultralytics`) and you are running from the project root.")
+    sys.exit(1)
+
+def draw_flow(img, flow, step=16):
+    """Draws optical flow vectors on an image."""
+    h, w = img.shape[:2]
+    y, x = np.mgrid[step/2:h:step, step/2:w:step].reshape(2,-1).astype(int)
+    fx, fy = flow[y,x].T
+    lines = np.vstack([x, y, x+fx, y+fy]).T.reshape(-1, 2, 2)
+    lines = np.int32(lines + 0.5)
+    cv2.polylines(img, lines, 0, (0, 255, 0))
+    for (x1, y1), (_x2, _y2) in lines:
+        cv2.circle(img, (x1, y1), 1, (0, 255, 0), -1)
+
+def simulate_live_stream(video_path: str, output_path: str | None = None, csv_path: str | None = None, fps: int = 30):
+    """
+    Reads a video file and loops it to simulate a live camera feed.
+
+    Args:
+        video_path (str): Path to the video file.
+        fps (int): The desired frames per second for playback.
+    """
+    delay = 1 / fps
+    window_name = "CrowdGuard Mock Stream"
+    
+    writer = None
+    csv_file = None
+
+    # --- Initialization ---
+    # Step A: Initialize the YOLOv8 person detector
+    print("Initializing YOLOv8 person detector...")
+    detector = YOLOv8PersonDetector()
+    # Step B: Initialize variables for optical flow
+    prev_gray = None
+    
+    # --- Phase 3: Initialization ---
+    # 1. Grid Segmentation
+    rows, cols = 10, 10
+    grid = None # Will be initialized on first frame
+    n_cells = rows * cols
+
+    # 2. Per-cell metrics history
+    densities = [] # Stores density history to calculate acceleration
+    accelerations = np.zeros(n_cells, dtype=float) # Stores the last calculated acceleration
+
+    # --- Phase 5: Initialization ---
+    print("Initializing multi-object tracker...")
+    tracker = MultiObjectTracker()
+
+    # Helper for visualization
+    def color_for_score(s: float) -> tuple[int, int, int]:
+        """Maps score (0..1) to a BGR color from green to red."""
+        s = max(0.0, min(1.0, float(s)))
+        if s <= 0.5:
+            t = s / 0.5
+            # green (0,255,0) -> yellow (0,255,255)
+            return (0, 255, int(t * 255))
+        else:
+            t = (s - 0.5) / 0.5
+            # yellow (0,255,255) -> red (0,0,255)
+            return (0, int(255 * (1 - t)), 255)
+
+
+    while True:
+        # Open the video file
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"Error: Could not open video file at {video_path}")
+            break
+
+        # --- Setup Output Writers on First Loop ---
+        if writer is None and output_path:
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            video_fps = cap.get(cv2.CAP_PROP_FPS) or fps
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(output_path, fourcc, video_fps, (width, height))
+            print(f"Will write annotated video to: {output_path}")
+
+        if csv_file is None and csv_path:
+            csv_file = open(csv_path, "w", newline="", encoding="utf-8")
+            csv_writer = csv.writer(csv_file)
+            # Write header
+            header = ["frame_idx", "time_s", "cell_idx", "density", "acceleration", "entropy", "score"]
+            csv_writer.writerow(header)
+            print(f"Will write data log to: {csv_path}")
+
+
+        print("--- Starting video loop ---")
+        frame_idx = 0
+        while cap.isOpened():
+            frame_start_time = time.time()
+
+            ret, frame = cap.read()
+
+            # If the frame is not returned, we've reached the end of the video
+            if not ret:
+                print("--- End of video, looping... ---")
+                break  # Break the inner loop to reopen the file
+            
+            frame_idx += 1
+
+            # Initialize grid on first frame
+            if grid is None:
+                h, w = frame.shape[:2]
+                grid = make_grid((h, w), rows, cols)
+
+            # --- Vision Pipeline (Detection & Flow) ---
+            # Object Detection
+            # Get bounding boxes for every person in the frame.
+            boxes = detector.detect(frame, conf_thresh=0.4)
+
+            # --- Phase 5: Trajectory Projection ---
+            # Update tracker with new detections
+            tracked_objects = tracker.update(boxes)
+
+            # Optical Flow
+            # Convert the frame to grayscale for flow calculation.
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            flow = None
+            if prev_gray is not None:
+                flow = cv2.calcOpticalFlowFarneback(
+                    prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
+                )
+
+            prev_gray = gray
+
+            # --- Phase 3: Mathematical Core ---
+            
+            # 2. Calculate Metrics per Cell
+            # Density: Count people in each cell
+            current_counts = np.zeros(n_cells, dtype=float)
+            for (x1, y1, x2, y2) in boxes:
+                cell_idx = bbox_center_to_cell((x1, y1, x2, y2), frame.shape[:2], rows, cols)
+                if 0 <= cell_idx < n_cells:
+                    current_counts[cell_idx] += 1
+            densities.append(current_counts)
+            if len(densities) > 3:
+                densities.pop(0) # Keep history size fixed
+
+            # Motion Entropy & Density Acceleration
+            entropies = np.zeros(n_cells, dtype=float)
+            
+            if flow is not None:
+                u, v = flow[:, :, 0], flow[:, :, 1]
+                for i, (x0, y0, x1, y1) in enumerate(grid):
+                    # Entropy
+                    cell_u, cell_v = u[y0:y1, x0:x1].ravel(), v[y0:y1, x0:x1].ravel()
+                    magnitudes = np.hypot(cell_u, cell_v)
+                    # Filter out small, noisy movements
+                    mask = magnitudes > 0.5
+                    if np.any(mask):
+                        angles = angles_from_flow(cell_u[mask], cell_v[mask])
+                        hist = direction_histogram(angles, bins=8)
+                        entropies[i] = normalized_entropy(hist)
+
+            if len(densities) == 3:
+                # Acceleration
+                d_t, d_t1, d_t2 = densities[2], densities[1], densities[0]
+                accelerations = d_t - 2 * d_t1 + d_t2
+
+            # Instability Fusion
+            # Normalize features across all cells for this frame
+            accel_norm = normalize_feature(accelerations, clip_min=0) # Only positive acceleration is a risk
+            entropy_norm = normalize_feature(entropies)
+
+            scores = np.zeros(n_cells, dtype=float)
+            for i in range(n_cells):
+                # w1=0.7 for acceleration, w2=0.3 for entropy
+                scores[i] = instability_score(accel_norm[i], entropy_norm[i], w1=0.7, w2=0.3)
+
+            # --- CSV Logging ---
+            if csv_file and csv_writer:
+                time_s = frame_idx / (cap.get(cv2.CAP_PROP_FPS) or fps)
+                for i in range(n_cells):
+                    row_data = [frame_idx, f"{time_s:.3f}", i, current_counts[i], accelerations[i], entropies[i], scores[i]]
+                    csv_writer.writerow(row_data)
+
+            # --- Visualization ---
+            overlay = frame.copy()
+            for i, (x0, y0, x1, y1) in enumerate(grid):
+                score = scores[i]
+                if score > 0.1: # Only draw for non-trivial scores
+                    color = color_for_score(score)
+                    alpha = 0.2 + 0.4 * score # Make high scores more opaque
+                    cv2.rectangle(overlay, (x0, y0), (x1, y1), color, -1)
+            
+            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+
+            # Draw grid lines and score text
+            for i, (x0, y0, x1, y1) in enumerate(grid):
+                cv2.rectangle(frame, (x0, y0), (x1, y1), (150, 150, 150), 1)
+                cv2.putText(frame, f"{scores[i]:.2f}", (x0 + 5, y0 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+
+            # Draw trajectories
+            video_fps = cap.get(cv2.CAP_PROP_FPS) or fps
+            for obj_state in tracked_objects:
+                cx, cy, w, h, vx, vy = obj_state
+                # Draw current position
+                pt1 = (int(cx - w/2), int(cy - h/2))
+                pt2 = (int(cx + w/2), int(cy + h/2))
+                cv2.rectangle(frame, pt1, pt2, (255, 0, 0), 2) # Blue box for tracked objects
+
+                # Project 5 seconds into the future
+                future_cx = int(cx + vx * 5 * video_fps)
+                future_cy = int(cy + vy * 5 * video_fps)
+                
+                cv2.line(frame, (int(cx), int(cy)), (future_cx, future_cy), (255, 255, 0), 2)
+
+            # Add a text overlay for the detection count
+            detection_text = f"Detections: {len(boxes)}"
+            cv2.putText(frame, detection_text, (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, 
+                        cv2.LINE_AA)
+
+            cv2.imshow(window_name, frame)
+
+            # --- Save Frame to Video ---
+            if writer:
+                writer.write(frame)
+
+            # Control the playback speed
+            elapsed_time = time.time() - frame_start_time
+            wait_time = max(1, int((delay - elapsed_time) * 1000))
+            # Exit on 'q' key press
+            if cv2.waitKey(wait_time) & 0xFF == ord('q'):
+                print("Exiting stream.")
+                cap.release()
+                cv2.destroyAllWindows()
+                if writer:
+                    writer.release()
+                if csv_file:
+                    csv_file.close()
+                return
+
+        # Release the capture object before the next loop iteration
+        cap.release()
+
+    cv2.destroyAllWindows()
+    if writer:
+        writer.release()
+    if csv_file:
+        csv_file.close()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Simulate a live video stream from a file.")
+    parser.add_argument(
+        "--video",
+        type=str,
+        default="data/sampel2.mp4",
+        help="Path to the video file to be used for the stream. Defaults to 'data/sampel2.mp4'."
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        help="Path to save the annotated output video file (e.g., output.mp4)."
+    )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        help="Path to save the logged per-cell data (e.g., log.csv)."
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=30,
+        help="Frames per second for the simulated stream."
+    )
+    args = parser.parse_args()
+
+    video_path = Path(args.video)
+    # If the path is not absolute, assume it's relative to the project root
+    if not video_path.is_absolute():
+        video_path = ROOT / video_path
+
+    simulate_live_stream(str(video_path), args.output, args.csv, args.fps)
+    
