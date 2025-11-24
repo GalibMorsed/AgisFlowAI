@@ -137,7 +137,4 @@ def risk_category(score: float) -> str:
         return "Green"
     if score < 0.6:
         return "Yellow"
-    return "Red"# c:\Users\morse\AgisFlowAI\src\pipeline.py
-    # c:\Users\morse\AgisFlowAI\src\pipeline.py
-    
-    
+    return "Red"

@@ -108,20 +108,13 @@ class YOLOv8PersonDetector:
     Requires `pip install ultralytics`. The model is downloaded on first use.
     """
 
-    def __init__(self, model_name: str = "yolov8n.pt", use_tensorrt: bool = True):
+    def __init__(self, model_name: str = "yolov8n.pt"):
         try:
             from ultralytics import YOLO
         except ImportError as e:
             raise RuntimeError(
                 "YOLOv8 detector requires `ultralytics`. Please install it with: pip install ultralytics"
             ) from e
-
-        # On edge devices, prefer the optimized TensorRT engine if available.
-        if use_tensorrt:
-            engine_path = Path(model_name).with_suffix(".engine")
-            if engine_path.exists():
-                print(f"Found TensorRT engine, loading: {engine_path}")
-                model_name = str(engine_path)
 
         self.model = YOLO(model_name)
         # The 'person' class is typically index 0 in COCO-trained models
@@ -190,5 +183,4 @@ class BackgroundSubtractorDetector:
             x2 = min(w - 1, x + cw)
             y2 = min(h - 1, y + ch)
             boxes.append((x1, y1, x2, y2))
-        return boxes# c:\Users\morse\AgisFlowAI\src\detector.py
-       
+        return boxes
