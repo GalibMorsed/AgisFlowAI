@@ -9,3 +9,5 @@ torch>=2.0.0
 
 #command
 python c:\Users\morse\AgisFlowAI\mock_stream.py
+#new
+python c:\Users\morse\AgisFlowAI\mock_stream.py --video data/vd5.mp4 --csv log.csv

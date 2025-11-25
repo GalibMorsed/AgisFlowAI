@@ -39,6 +39,13 @@ def draw_flow(img, flow, step=16):
     for (x1, y1), (_x2, _y2) in lines:
         cv2.circle(img, (x1, y1), 1, (0, 255, 0), -1)
 
+def color_for_score(s: float) -> tuple[int, int, int]:
+    """Helper for visualization: map score (0..1) to BGR color."""
+    s = max(0.0, min(1.0, float(s)))
+    # Interpolate between Green -> Yellow -> Red
+    # Green (0,255,0), Yellow (0,255,255), Red (0,0,255) in BGR
+    return (0, int(255 * (1-s)**2), int(255 * s**2))
+
 def simulate_live_stream(video_path: str, output_path: str | None = None, csv_path: str | None = None, fps: int = 30):
     """
     Reads a video file and loops it to simulate a live camera feed.
@@ -73,19 +80,6 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
     # --- Phase 5: Initialization ---
     print("Initializing multi-object tracker...")
     tracker = MultiObjectTracker()
-
-    # Helper for visualization
-    def color_for_score(s: float) -> tuple[int, int, int]:
-        """Maps score (0..1) to a BGR color from green to red."""
-        s = max(0.0, min(1.0, float(s)))
-        if s <= 0.5:
-            t = s / 0.5
-            # green (0,255,0) -> yellow (0,255,255)
-            return (0, 255, int(t * 255))
-        else:
-            t = (s - 0.5) / 0.5
-            # yellow (0,255,255) -> red (0,0,255)
-            return (0, int(255 * (1 - t)), 255)
 
 
     while True:
@@ -188,13 +182,18 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
 
             # Instability Fusion
             # Normalize features across all cells for this frame
+            density_norm = normalize_feature(current_counts)
             accel_norm = normalize_feature(accelerations, clip_min=0) # Only positive acceleration is a risk
             entropy_norm = normalize_feature(entropies)
+            
+            # New "Path Blockage" feature
+            blockage = density_norm * (1 - entropy_norm) # High density, low entropy
+            blockage_norm = normalize_feature(blockage)
 
             scores = np.zeros(n_cells, dtype=float)
             for i in range(n_cells):
-                # w1=0.7 for acceleration, w2=0.3 for entropy
-                scores[i] = instability_score(accel_norm[i], entropy_norm[i], w1=0.7, w2=0.3)
+                # w1=accel, w2=entropy, w3=blockage
+                scores[i] = instability_score(accel_norm[i], entropy_norm[i], blockage_norm[i], w1=0.5, w2=0.2, w3=0.3)
 
             # --- CSV Logging ---
             if csv_file and csv_writer:
@@ -236,8 +235,14 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
 
             # Add a text overlay for the detection count
             detection_text = f"Detections: {len(boxes)}"
-            cv2.putText(frame, detection_text, (10, 30), 
+            cv2.putText(frame, detection_text, (10, 55), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, 
+                        cv2.LINE_AA)
+            
+            # Add the video filename
+            video_name_text = f"Video: {Path(video_path).name}"
+            cv2.putText(frame, video_name_text, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2,
                         cv2.LINE_AA)
 
             cv2.imshow(window_name, frame)
@@ -267,6 +272,49 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
     if writer:
         writer.release()
     if csv_file:
+        # --- Analysis Explanation File Generation ---
+        # Ensure the file is closed before trying to read it
+        csv_file.close()
+        
+        explanation_path = ROOT / "analysis_explanation.txt"
+        logger.info(f"Generating analysis explanation file at: {explanation_path}")
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+
+            # Find the frame with the highest overall score
+            max_score_frame = df.loc[df['score'].idxmax()]
+            peak_frame = int(max_score_frame['frame_idx'])
+            peak_score = max_score_frame['score']
+            peak_cell = int(max_score_frame['cell_idx'])
+
+            # Count frames with "Danger" and "Warning"
+            danger_frames = df[df['score'] >= 0.6]['frame_idx'].nunique()
+            warning_frames = df[(df['score'] >= 0.3) & (df['score'] < 0.6)]['frame_idx'].nunique()
+
+            # Find the most frequently dangerous cell
+            danger_cells = df[df['score'] >= 0.6]
+            most_dangerous_cell = danger_cells['cell_idx'].mode()[0] if not danger_cells.empty else "None"
+
+            # Write the explanation
+            with open(explanation_path, "w", encoding="utf-8") as f:
+                f.write("CrowdGuard Analysis Report\n")
+                f.write("="*30 + "\n\n")
+                f.write(f"Video File: {Path(video_path).name}\n")
+                f.write(f"Total Frames Analyzed: {df['frame_idx'].max()}\n\n")
+                f.write("Key Findings:\n")
+                f.write("-------------\n")
+                f.write(f"- Peak Hazard Score: {peak_score:.3f} occurred at frame {peak_frame} in cell {peak_cell}.\n")
+                f.write(f"- Total frames with 'Danger' level alerts (score >= 0.6): {danger_frames}\n")
+                f.write(f"- Total frames with 'Warning' level alerts (0.3 <= score < 0.6): {warning_frames}\n")
+                f.write(f"- Most frequently dangerous cell: {most_dangerous_cell}\n")
+            
+            logger.info("Successfully wrote analysis explanation.")
+
+        except ImportError:
+            logger.warning("Pandas is not installed. Skipping explanation file generation. Please run 'pip install pandas'.")
+        except Exception as e:
+            logger.error(f"Failed to generate explanation file: {e}")
         csv_file.close()
 
 if __name__ == "__main__":
@@ -274,7 +322,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--video",
         type=str,
-        default="data/sampel2.mp4",
+        default="data/panic.mp4",
         help="Path to the video file to be used for the stream. Defaults to 'data/sampel2.mp4'."
     )
     parser.add_argument(

@@ -117,24 +117,25 @@ def normalize_feature(x: np.ndarray, clip_min: float | None = None, clip_max: fl
     return (x - mn) / (mx - mn)
 
 
-def instability_score(a: float, e: float, w1: float = 0.7, w2: float = 0.3) -> float:
-    """Compute rule-based instability score from normalized features.
+def instability_score(a: float, e: float, b: float, w1: float = 0.5, w2: float = 0.2, w3: float = 0.3) -> float:
+    """Compute rule-based Hazard Score from normalized features.
 
     This function implements the "Instability Signature Fusion" logic.
 
     a: Normalized Density Acceleration feature [0,1].
     e: Normalized Motion Entropy feature [0,1].
-    w1, w2: Weights for acceleration and entropy, respectively.
+    b: Normalized Path Blockage feature [0,1].
+    w1, w2, w3: Weights for acceleration, entropy, and blockage.
     Output is clipped to [0,1].
     """
-    raw = (w1 * a) + (w2 * e)
+    raw = (w1 * a) + (w2 * e) + (w3 * b)
     return float(max(0.0, min(1.0, raw)))
 
 
 def risk_category(score: float) -> str:
-    """Map score to category string: Green, Yellow, Red."""
+    """Map score to category string: Safe, Warning, Danger."""
     if score < 0.3:
-        return "Green"
+        return "Safe"
     if score < 0.6:
-        return "Yellow"
-    return "Red"
+        return "Warning"
+    return "Danger"
