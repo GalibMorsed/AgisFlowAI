@@ -6,6 +6,7 @@ import time
 import argparse
 import sys
 from pathlib import Path
+from collections import deque
 
 # Ensure the project root is on the Python path
 ROOT = Path(__file__).resolve().parent
@@ -46,6 +47,49 @@ def color_for_score(s: float) -> tuple[int, int, int]:
     # Green (0,255,0), Yellow (0,255,255), Red (0,0,255) in BGR
     return (0, int(255 * (1-s)**2), int(255 * s**2))
 
+def draw_history_chart(frame, history: dict, top_cell_idx: int, width: int = 300, height: int = 150):
+    """Draws a time-series chart for the metrics of a specific cell."""
+    if top_cell_idx is None or not history['score']:
+        return
+
+    chart_img = np.full((height, width, 3), (20, 20, 20), dtype=np.uint8)
+    
+    # Get data for the top cell
+    score_hist = [h[top_cell_idx] for h in history['score']]
+    density_hist = [h[top_cell_idx] for h in history['density']]
+    accel_hist = [h[top_cell_idx] for h in history['accel']]
+    entropy_hist = [h[top_cell_idx] for h in history['entropy']]
+
+    # Draw Title
+    title = f"Cell {top_cell_idx} Metrics"
+    cv2.putText(chart_img, title, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # Draw data lines
+    series = {
+        "Score": (score_hist, (0, 0, 255)),       # Red
+        "Density": (density_hist, (0, 255, 0)),   # Green
+        "Accel": (accel_hist, (255, 255, 0)),     # Cyan
+        "Entropy": (entropy_hist, (255, 0, 255)), # Magenta
+    }
+
+    y_offset = 40
+    for i, (name, (data, color)) in enumerate(series.items()):
+        if not data:
+            continue
+        
+        # Draw legend
+        cv2.putText(chart_img, name, (10, y_offset + i*25), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        # Draw polyline for the data history
+        points = np.array([[int(width * (j / len(data))), int(height - 20 - (val * (height - 40)))] for j, val in enumerate(data) if val is not None], dtype=np.int32)
+        if len(points) > 1:
+            cv2.polylines(chart_img, [points], isClosed=False, color=color, thickness=1)
+
+    # Overlay chart onto the main frame (top-right corner)
+    x_offset = frame.shape[1] - width - 10
+    y_offset = 10
+    frame[y_offset:y_offset+height, x_offset:x_offset+width] = cv2.addWeighted(frame[y_offset:y_offset+height, x_offset:x_offset+width], 0.3, chart_img, 0.7, 0)
+
 def simulate_live_stream(video_path: str, output_path: str | None = None, csv_path: str | None = None, fps: int = 30):
     """
     Reads a video file and loops it to simulate a live camera feed.
@@ -76,6 +120,15 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
     # 2. Per-cell metrics history
     densities = [] # Stores density history to calculate acceleration
     accelerations = np.zeros(n_cells, dtype=float) # Stores the last calculated acceleration
+    
+    # History for plotting charts
+    history_len = 100
+    metric_history = {
+        'score': deque(maxlen=history_len),
+        'density': deque(maxlen=history_len),
+        'accel': deque(maxlen=history_len),
+        'entropy': deque(maxlen=history_len),
+    }
 
     # --- Phase 5: Initialization ---
     print("Initializing multi-object tracker...")
@@ -195,6 +248,12 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
                 # w1=accel, w2=entropy, w3=blockage
                 scores[i] = instability_score(accel_norm[i], entropy_norm[i], blockage_norm[i], w1=0.5, w2=0.2, w3=0.3)
 
+            # Update metric history for charts
+            metric_history['score'].append(scores.copy())
+            metric_history['density'].append(density_norm.copy())
+            metric_history['accel'].append(accel_norm.copy())
+            metric_history['entropy'].append(entropy_norm.copy())
+
             # --- CSV Logging ---
             if csv_file and csv_writer:
                 time_s = frame_idx / (cap.get(cv2.CAP_PROP_FPS) or fps)
@@ -244,6 +303,11 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
             cv2.putText(frame, video_name_text, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2,
                         cv2.LINE_AA)
+
+            # Draw prediction chart for the most dangerous cell
+            top_cell_idx = np.argmax(scores) if scores.any() else None
+            if top_cell_idx is not None:
+                draw_history_chart(frame, metric_history, top_cell_idx)
 
             cv2.imshow(window_name, frame)
 
