@@ -129,7 +129,7 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
             # --- Vision Pipeline (Detection & Flow) ---
             # Object Detection
             # Get bounding boxes for every person in the frame.
-            boxes = detector.detect(frame, conf_thresh=0.4)
+            boxes = detector.detect(frame, conf_thresh=0.25)
 
             # --- Phase 5: Trajectory Projection ---
             # Update tracker with new detections
@@ -315,7 +315,6 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
             logger.warning("Pandas is not installed. Skipping explanation file generation. Please run 'pip install pandas'.")
         except Exception as e:
             logger.error(f"Failed to generate explanation file: {e}")
-        csv_file.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simulate a live video stream from a file.")
