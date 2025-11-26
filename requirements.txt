@@ -11,12 +11,11 @@ ultralytics>=8.0.0
 # Install if you plan to train models: `pip install torch` (check https://pytorch.org/)
 torch>=2.0.0
 
-#command to start the python
-python c:\Users\morse\AgisFlowAI\mock_stream.py
+# Use a webcam
+python c:\Users\morse\AgisFlowAI\mock_stream.py --video 0
 
-
-#command if using a video file
-python c:\Users\morse\AgisFlowAI\mock_stream.py --video data/panic.mp4
+# Use a video file (e.g., one with a panic event)
+python c:\Users\morse\AgisFlowAI\mock_stream.py --video data/sampel2.mp4
 
 
 #command to start with the device camera 
@@ -25,3 +24,7 @@ python c:\Users\morse\AgisFlowAI\mock_stream.py --video 0
 
 #dashboard
 python -m streamlit run c:\Users\morse\AgisFlowAI\crowdguard_dashboard.py
+
+
+#autoencoder for training 
+python c:\Users\morse\AgisFlowAI\src\autoencoder.py

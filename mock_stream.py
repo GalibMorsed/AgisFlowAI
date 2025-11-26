@@ -15,16 +15,18 @@ sys.path.insert(0, str(ROOT))
 
 try:
     from src.detector import YOLOv8PersonDetector
+    import torch
+    import torch.nn as nn
     from src.tracker import MultiObjectTracker
     from src.pipeline import (
-        make_grid,
-        bbox_center_to_cell,
         angles_from_flow,
         direction_histogram,
         normalized_entropy,
         normalize_feature,
         instability_score,
     )
+    from src.dynamic_grid import create_adaptive_grid
+    from src.autoencoder import ConvAutoencoder
 except ImportError as e:
     print(f"Error importing detector: {e}")
     print("Please ensure 'ultralytics' is installed (`pip install ultralytics`) and you are running from the project root.")
@@ -92,6 +94,30 @@ def draw_history_chart(frame, history: dict, top_cell_idx: int, width: int = 300
     frame[y_offset:y_offset+height, x_offset:x_offset+width] = cv2.addWeighted(frame[y_offset:y_offset+height, x_offset:x_offset+width], 0.3, chart_img, 0.7, 0)
 
 def simulate_live_stream(video_source: str | int, output_path: str | None = None, csv_path: str | None = None, fps: int = 30):
+    # --- Anomaly Detection Model ---
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ae_model = ConvAutoencoder().to(device)
+    model_path = ROOT / "models" / "autoencoder.pth"
+    
+    if not model_path.exists():
+        print("="*50)
+        print("WARNING: Autoencoder model not found at 'models/autoencoder.pth'")
+        print("The advanced anomaly score will not be calculated.")
+        print("Please train the model by running: python src/autoencoder.py")
+        print("="*50)
+        ae_model = None
+    else:
+        print(f"Loading autoencoder model from {model_path} onto {device}...")
+        ae_model.load_state_dict(torch.load(str(model_path)))
+        ae_model.eval()
+
+    def get_anomaly_score(frame, model, target_size=(128, 128)):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        resized = cv2.resize(gray, target_size) / 255.0
+        img_tensor = torch.from_numpy(resized).unsqueeze(0).unsqueeze(0).float().to(device)
+        with torch.no_grad():
+            reconstruction = model(img_tensor)
+            return nn.MSELoss()(reconstruction, img_tensor).item()
     """
     Reads a video file and loops it to simulate a live camera feed.
 
@@ -114,10 +140,10 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
     prev_gray = None
     
     # --- Phase 3: Initialization ---
-    # 1. Grid Segmentation
-    rows, cols = 10, 10
+    # 1. Grid will be generated dynamically
     grid = None # Will be initialized on first frame
-    n_cells = rows * cols
+    n_cells = 0
+    grid_update_interval = 15 # Update grid every 15 frames
 
     # 2. Per-cell metrics history
     densities = [] # Stores density history to calculate acceleration
@@ -130,6 +156,7 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
         'density': deque(maxlen=history_len),
         'accel': deque(maxlen=history_len),
         'entropy': deque(maxlen=history_len),
+        'anomaly': deque(maxlen=history_len),
     }
 
     # --- Phase 5: Initialization ---
@@ -157,7 +184,7 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
             csv_file = open(csv_path, "w", newline="", encoding="utf-8")
             csv_writer = csv.writer(csv_file)
             # Write header
-            header = ["frame_idx", "time_s", "cell_idx", "density", "acceleration", "entropy", "score"]
+            header = ["frame_idx", "time_s", "cell_idx", "density", "acceleration", "entropy", "score", "anomaly_score"]
             csv_writer.writerow(header)
             print(f"Will write data log to: {csv_path}")
 
@@ -177,10 +204,15 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
             
             frame_idx += 1
 
-            # Initialize grid on first frame
-            if grid is None:
-                h, w = frame.shape[:2]
-                grid = make_grid((h, w), rows, cols)
+            # --- Vision Pipeline (Detection & Flow) ---
+            # Object Detection
+            # Get bounding boxes for every person in the frame.
+            boxes = detector.detect(frame, conf_thresh=0.25)
+
+            # --- Dynamic Grid Generation ---
+            if frame_idx % grid_update_interval == 1:
+                grid = create_adaptive_grid(frame.shape[:2], boxes, base_rows=6, base_cols=10, subdivide_threshold=3)
+                n_cells = len(grid)
 
             # --- Vision Pipeline (Detection & Flow) ---
             # Object Detection
@@ -204,11 +236,18 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
 
             # --- Phase 3: Mathematical Core ---
             
+            # Initialize metric arrays based on current grid size
+            current_counts = np.zeros(n_cells, dtype=float)
+            accelerations = np.zeros(n_cells, dtype=float)
+            entropies = np.zeros(n_cells, dtype=float)
+            scores = np.zeros(n_cells, dtype=float)
+
             # 2. Calculate Metrics per Cell
             # Density: Count people in each cell
-            current_counts = np.zeros(n_cells, dtype=float)
             for (x1, y1, x2, y2) in boxes:
-                cell_idx = bbox_center_to_cell((x1, y1, x2, y2), frame.shape[:2], rows, cols)
+                # Find which cell the box center belongs to in the dynamic grid
+                center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
+                cell_idx = next((i for i, (gx0, gy0, gx1, gy1) in enumerate(grid) if gx0 <= center_x < gx1 and gy0 <= center_y < gy1), -1)
                 if 0 <= cell_idx < n_cells:
                     current_counts[cell_idx] += 1
             densities.append(current_counts)
@@ -216,8 +255,6 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
                 densities.pop(0) # Keep history size fixed
 
             # Motion Entropy & Density Acceleration
-            entropies = np.zeros(n_cells, dtype=float)
-            
             if flow is not None:
                 u, v = flow[:, :, 0], flow[:, :, 1]
                 for i, (x0, y0, x1, y1) in enumerate(grid):
@@ -231,10 +268,16 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
                         hist = direction_histogram(angles, bins=8)
                         entropies[i] = normalized_entropy(hist)
 
-            if len(densities) == 3:
+            # Ensure density history is compatible with current grid size
+            if len(densities) == 3 and all(d.shape == (n_cells,) for d in densities):
                 # Acceleration
                 d_t, d_t1, d_t2 = densities[2], densities[1], densities[0]
                 accelerations = d_t - 2 * d_t1 + d_t2
+            else:
+                # If grid size changed, reset density history
+                densities.clear()
+                densities.append(current_counts)
+
 
             # Instability Fusion
             # Normalize features across all cells for this frame
@@ -246,22 +289,31 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
             blockage = density_norm * (1 - entropy_norm) # High density, low entropy
             blockage_norm = normalize_feature(blockage)
 
-            scores = np.zeros(n_cells, dtype=float)
+            # --- Advanced Anomaly Score ---
+            anomaly_score = 0.0
+            if ae_model:
+                anomaly_score = get_anomaly_score(frame, ae_model)
+                # Scale the score to be more impactful, this may need tuning
+                anomaly_score = min(1.0, anomaly_score * 100) 
+
             for i in range(n_cells):
-                # w1=accel, w2=entropy, w3=blockage
-                scores[i] = instability_score(accel_norm[i], entropy_norm[i], blockage_norm[i], w1=0.5, w2=0.2, w3=0.3)
+                # w1=accel, w2=entropy, w3=blockage, w4=global_anomaly
+                base_score = instability_score(accel_norm[i], entropy_norm[i], blockage_norm[i], w1=0.4, w2=0.2, w3=0.2)
+                # The global anomaly score boosts the score of cells that already have some instability
+                scores[i] = base_score + (anomaly_score * density_norm[i] * 0.2)
 
             # Update metric history for charts
             metric_history['score'].append(scores.copy())
             metric_history['density'].append(density_norm.copy())
             metric_history['accel'].append(accel_norm.copy())
             metric_history['entropy'].append(entropy_norm.copy())
+            metric_history['anomaly'].append(anomaly_score)
 
             # --- CSV Logging ---
             if csv_file and csv_writer:
                 time_s = frame_idx / (cap.get(cv2.CAP_PROP_FPS) or fps)
                 for i in range(n_cells):
-                    row_data = [frame_idx, f"{time_s:.3f}", i, current_counts[i], accelerations[i], entropies[i], scores[i]]
+                    row_data = [frame_idx, f"{time_s:.3f}", i, current_counts[i], accelerations[i], entropies[i], scores[i], anomaly_score]
                     csv_writer.writerow(row_data)
 
             # --- Visualization ---
@@ -300,6 +352,12 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
             cv2.putText(frame, detection_text, (10, 55), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, 
                         cv2.LINE_AA)
+            
+            # Add anomaly score text
+            anomaly_text = f"Anomaly Score: {anomaly_score:.3f}"
+            anomaly_color = color_for_score(anomaly_score)
+            cv2.putText(frame, anomaly_text, (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, anomaly_color, 2, cv2.LINE_AA)
+
             
             # Add the video filename
             if is_camera:
