@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from collections import deque
 
+
 # Ensure the project root is on the Python path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -90,14 +91,15 @@ def draw_history_chart(frame, history: dict, top_cell_idx: int, width: int = 300
     y_offset = 10
     frame[y_offset:y_offset+height, x_offset:x_offset+width] = cv2.addWeighted(frame[y_offset:y_offset+height, x_offset:x_offset+width], 0.3, chart_img, 0.7, 0)
 
-def simulate_live_stream(video_path: str, output_path: str | None = None, csv_path: str | None = None, fps: int = 30):
+def simulate_live_stream(video_source: str | int, output_path: str | None = None, csv_path: str | None = None, fps: int = 30):
     """
     Reads a video file and loops it to simulate a live camera feed.
 
     Args:
-        video_path (str): Path to the video file.
+        video_source (str | int): Path to the video file or an integer for camera index.
         fps (int): The desired frames per second for playback.
     """
+    is_camera = isinstance(video_source, int)
     delay = 1 / fps
     window_name = "CrowdGuard Mock Stream"
     
@@ -137,10 +139,10 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
 
     while True:
         # Open the video file
-        cap = cv2.VideoCapture(video_path)
+        cap = cv2.VideoCapture(video_source)
         if not cap.isOpened():
-            print(f"Error: Could not open video file at {video_path}")
-            break
+            print(f"Error: Could not open video source: {video_source}")
+            return # Exit if the source can't be opened
 
         # --- Setup Output Writers on First Loop ---
         if writer is None and output_path:
@@ -169,7 +171,8 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
 
             # If the frame is not returned, we've reached the end of the video
             if not ret:
-                print("--- End of video, looping... ---")
+                if not is_camera:
+                    print("--- End of video, looping... ---")
                 break  # Break the inner loop to reopen the file
             
             frame_idx += 1
@@ -299,10 +302,13 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
                         cv2.LINE_AA)
             
             # Add the video filename
-            video_name_text = f"Video: {Path(video_path).name}"
+            if is_camera:
+                video_name_text = f"Camera Index: {video_source}"
+            else:
+                video_name_text = f"Video: {Path(video_source).name}"
             cv2.putText(frame, video_name_text, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2,
-                        cv2.LINE_AA)
+                        cv2.LINE_AA)            
 
             # Draw prediction chart for the most dangerous cell
             top_cell_idx = np.argmax(scores) if scores.any() else None
@@ -331,6 +337,10 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
 
         # Release the capture object before the next loop iteration
         cap.release()
+
+        # If using a camera, we don't want to loop.
+        if is_camera:
+            break
 
     cv2.destroyAllWindows()
     if writer:
@@ -364,7 +374,7 @@ def simulate_live_stream(video_path: str, output_path: str | None = None, csv_pa
             with open(explanation_path, "w", encoding="utf-8") as f:
                 f.write("CrowdGuard Analysis Report\n")
                 f.write("="*30 + "\n\n")
-                f.write(f"Video File: {Path(video_path).name}\n")
+                f.write(f"Video Source: {Path(video_source).name if isinstance(video_source, str) else f'Camera {video_source}'}\n")
                 f.write(f"Total Frames Analyzed: {df['frame_idx'].max()}\n\n")
                 f.write("Key Findings:\n")
                 f.write("-------------\n")
@@ -385,8 +395,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--video",
         type=str,
-        default="data/panic.mp4",
-        help="Path to the video file to be used for the stream. Defaults to 'data/sampel2.mp4'."
+        default="0",
+        help="Path to a video file or an integer for the camera index (e.g., '0' for the default camera)."
     )
     parser.add_argument(
         "--output",
@@ -407,10 +417,18 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    video_path = Path(args.video)
-    # If the path is not absolute, assume it's relative to the project root
-    if not video_path.is_absolute():
-        video_path = ROOT / video_path
+    video_source_arg = args.video
+    video_source: str | int
 
-    simulate_live_stream(str(video_path), args.output, args.csv, args.fps)
+    try:
+        # Try to convert to integer for camera index
+        video_source = int(video_source_arg)
+    except ValueError:
+        # If it's not an integer, treat it as a file path
+        video_path = Path(video_source_arg)
+        if not video_path.is_absolute():
+            video_path = ROOT / video_path
+        video_source = str(video_path)
+
+    simulate_live_stream(video_source, args.output, args.csv, args.fps)
     
