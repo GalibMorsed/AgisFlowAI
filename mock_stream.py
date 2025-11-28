@@ -4,10 +4,12 @@ import numpy as np
 import csv
 import time
 import argparse
+import base64
 import sys
 from pathlib import Path
 from collections import deque
-
+import os
+from dotenv import load_dotenv
 
 # Ensure the project root is on the Python path
 ROOT = Path(__file__).resolve().parent
@@ -27,9 +29,12 @@ try:
     )
     from src.dynamic_grid import create_adaptive_grid
     from src.autoencoder import ConvAutoencoder
+    from openai import OpenAI
 except ImportError as e:
     print(f"Error importing detector: {e}")
-    print("Please ensure 'ultralytics' is installed (`pip install ultralytics`) and you are running from the project root.")
+    print("Please ensure all dependencies are installed (`pip install -r requirements.txt`)")
+    if 'openai' in str(e):
+        print("You may need to `pip install openai` and `pip install python-dotenv`.")
     sys.exit(1)
 
 def draw_flow(img, flow, step=16):
@@ -93,6 +98,49 @@ def draw_history_chart(frame, history: dict, top_cell_idx: int, width: int = 300
     y_offset = 10
     frame[y_offset:y_offset+height, x_offset:x_offset+width] = cv2.addWeighted(frame[y_offset:y_offset+height, x_offset:x_offset+width], 0.3, chart_img, 0.7, 0)
 
+def get_ai_analysis(client: OpenAI, frame: np.ndarray, score: float, density: float, accel: float, entropy: float) -> str:
+    """
+    Sends frame and metrics to an AI model for a natural language analysis.
+    """
+    _, buffer = cv2.imencode(".jpg", frame)
+    base64_frame = base64.b64encode(buffer).decode("utf-8")
+
+    prompt = f"""
+    Analyze the attached image of a crowd. The system has detected a potential instability.
+    Your task is for a security operator. You must provide two things:
+    1. A concise, one-sentence **Alert** describing the situation.
+    2. A brief, one-sentence **Suggestion** for a possible action.
+
+    Key metrics from the most unstable area:
+    - Instability Score: {score:.2f} (0=stable, 1=highly unstable)
+    - Normalized Density: {density:.2f} (how crowded it is)
+    - Normalized Acceleration: {accel:.2f} (how quickly the crowd density is increasing)
+    - Normalized Motion Entropy: {entropy:.2f} (0=uniform movement, 1=chaotic movement)
+    
+    Based on the image and metrics, describe the situation and suggest an action.
+    Return your response in the following format, and nothing else:
+    Alert: [Your one-sentence alert here]
+    Suggestion: [Your one-sentence suggestion here]
+    
+    Example:
+    Alert: High-density crowd in the upper left is showing signs of chaotic movement.
+    Suggestion: Dispatch personnel to the upper left area to observe and manage crowd flow.
+    """
+    try:
+        response = client.chat.completions.create(
+            model="nvidia/nemotron-nano-12b-v2-vl:free", # Or another vision-capable model
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_frame}"}}
+                ]}
+            ],
+            max_tokens=150,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"AI API Error: {str(e)[:100]}"
+
 def simulate_live_stream(video_source: str | int, output_path: str | None = None, csv_path: str | None = None, fps: int = 30):
     # --- Anomaly Detection Model ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -118,6 +166,22 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
         with torch.no_grad():
             reconstruction = model(img_tensor)
             return nn.MSELoss()(reconstruction, img_tensor).item()
+
+    # --- AI API Integration ---
+    load_dotenv()
+    api_key = os.getenv("OPENAI_API_KEY")
+    ai_client = None
+    if api_key:
+        print("OpenAI API key found. Initializing client.")
+        ai_client = OpenAI(api_key=api_key)
+    else:
+        print("WARNING: OPENAI_API_KEY not found in .env file. AI analysis will be disabled.")
+
+    # --- Dashboard Integration ---
+    dashboard_dir = ROOT / "dashboard_data"
+    os.makedirs(dashboard_dir, exist_ok=True)
+    print(f"Dashboard data will be written to: {dashboard_dir}")
+
     """
     Reads a video file and loops it to simulate a live camera feed.
 
@@ -162,6 +226,11 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
     # --- Phase 5: Initialization ---
     print("Initializing multi-object tracker...")
     tracker = MultiObjectTracker()
+
+    # --- AI Alerting State ---
+    ai_alert_cooldown = 0  # Frames to wait before next AI call
+    ai_alert_threshold = 0.6 # Score to trigger AI analysis
+    last_ai_alert = "AI Analysis Standby"
 
 
     while True:
@@ -372,6 +441,50 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
             top_cell_idx = np.argmax(scores) if scores.any() else None
             if top_cell_idx is not None:
                 draw_history_chart(frame, metric_history, top_cell_idx)
+
+            # --- AI Alerting Logic ---
+            if ai_client and ai_alert_cooldown == 0:
+                if scores.any() and scores[top_cell_idx] > ai_alert_threshold:
+                    print(f"High instability detected (Score: {scores[top_cell_idx]:.2f}). Triggering AI analysis...")
+                    last_ai_alert = get_ai_analysis(
+                        client=ai_client,
+                        frame=frame,
+                        score=scores[top_cell_idx],
+                        density=density_norm[top_cell_idx],
+                        accel=accel_norm[top_cell_idx],
+                        entropy=entropy_norm[top_cell_idx]
+                    )
+                    ai_alert_cooldown = fps * 10 # Cooldown for 10 seconds
+            
+            if ai_alert_cooldown > 0:
+                ai_alert_cooldown -= 1
+
+            # --- AI Alert Display ---
+            # Create a semi-transparent background for the text at the bottom
+            alert_bg_height = 40
+            y_offset = frame.shape[0] - alert_bg_height
+            
+            sub_img = frame[y_offset:, :]
+            black_rect = np.zeros(sub_img.shape, dtype=np.uint8)
+            res = cv2.addWeighted(sub_img, 0.6, black_rect, 0.4, 1.0)
+            frame[y_offset:, :] = res
+
+            # Determine text color based on status
+            if "Standby" in last_ai_alert:
+                alert_color = (200, 200, 200)  # Gray for standby
+            elif "Error" in last_ai_alert:
+                alert_color = (0, 0, 255)      # Red for error
+            else:
+                alert_color = (0, 255, 255)    # Yellow for an active alert
+
+            cv2.putText(frame, f"AI Alert: {last_ai_alert}", (10, frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, alert_color, 2, cv2.LINE_AA)
+
+            # --- Dashboard Data Output ---
+            # Save the latest frame and alert for the dashboard to read
+            cv2.imwrite(str(dashboard_dir / "latest_frame.jpg"), frame)
+            with open(dashboard_dir / "latest_alert.txt", "w", encoding="utf-8") as f:
+                f.write(last_ai_alert)
+
 
             cv2.imshow(window_name, frame)
 
