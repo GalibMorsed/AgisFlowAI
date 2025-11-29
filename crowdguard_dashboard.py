@@ -21,16 +21,13 @@ ALERT_PATH = DASHBOARD_DATA_DIR / "latest_alert.txt"
 # --- UI Components ---
 st.title("🛡️ CrowdGuard Live Monitoring")
 
-# Create columns for the video feed and the AI alerts
-col1, col2 = st.columns([3, 1])
+# Define placeholders for the UI elements
+st.header("Live Video Feed")
+image_placeholder = st.empty()
 
-with col1:
-    st.header("Live Video Feed")
-    image_placeholder = st.empty()
-
-with col2:
-    st.header("AI Analysis")
-    alert_placeholder = st.empty()
+st.header("AI Analysis")
+alert_placeholder = st.empty()
+suggestion_placeholder = st.empty()
 
 # --- Main Loop ---
 while True:
@@ -55,9 +52,20 @@ while True:
             suggestion_content = ""
 
             if "Alert:" in alert_text and "Suggestion:" in alert_text:
+                # Split the alert text by newline characters
                 lines = alert_text.split('\n')
-                alert_content = lines[0].replace("Alert:", "").strip()
-                suggestion_content = lines[1].replace("Suggestion:", "").strip()
+                # Ensure there are at least two lines before attempting to access lines[1]
+                if len(lines) >= 2:
+                    alert_content = lines[0].replace("Alert:", "").strip()
+                    suggestion_content = lines[1].replace("Suggestion:", "").strip()
+                else:
+                    # Handle cases where the expected multi-line format is not present
+                    alert_content = "Malformed AI response detected."
+                    suggestion_content = "Check AI output format."
+
+            # Clear previous state
+            alert_placeholder.empty()
+            suggestion_placeholder.empty()
 
             if "Standby" in alert_text:
                 alert_placeholder.info(f"**Status:** {alert_text}", icon="⏳")
@@ -65,7 +73,7 @@ while True:
                 alert_placeholder.error(f"**Status:** {alert_text}", icon="🔥")
             elif alert_content:
                 alert_placeholder.warning(f"**ALERT:** {alert_content}", icon="⚠️")
-                alert_placeholder.info(f"**Suggestion:** {suggestion_content}", icon="💡")
+                suggestion_placeholder.info(f"**Suggestion:** {suggestion_content}", icon="💡")
 
     except Exception as e:
         st.error(f"An error occurred: {e}")

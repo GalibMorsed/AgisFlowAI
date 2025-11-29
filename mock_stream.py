@@ -29,7 +29,7 @@ try:
     )
     from src.dynamic_grid import create_adaptive_grid
     from src.autoencoder import ConvAutoencoder
-    from openai import OpenAI
+    from openai import OpenAI, APIConnectionError
 except ImportError as e:
     print(f"Error importing detector: {e}")
     print("Please ensure all dependencies are installed (`pip install -r requirements.txt`)")
@@ -128,7 +128,7 @@ def get_ai_analysis(client: OpenAI, frame: np.ndarray, score: float, density: fl
     """
     try:
         response = client.chat.completions.create(
-            model="nvidia/nemotron-nano-12b-v2-vl:free", # Or another vision-capable model
+            model="nvidia/nemotron-nano-12b-v2-vl:free", # A powerful vision-language model from NVIDIA
             messages=[
                 {"role": "user", "content": [
                     {"type": "text", "text": prompt},
@@ -136,10 +136,21 @@ def get_ai_analysis(client: OpenAI, frame: np.ndarray, score: float, density: fl
                 ]}
             ],
             max_tokens=150,
+            timeout=20.0, # Add a 20-second timeout
         )
         return response.choices[0].message.content.strip()
+    except APIConnectionError as e:
+        print("\n--- DETAILED AI API CONNECTION ERROR ---")
+        # This will print the underlying reason for the connection error, e.g., an SSL issue.
+        print(f"Failed to connect to API: {e.__cause__}")
+        print("--- END DETAILED ERROR ---\n")
+        return "AI API Error: Connection error. Check console for details."
     except Exception as e:
-        return f"AI API Error: {str(e)[:100]}"
+        print("\n--- DETAILED AI API GENERIC ERROR ---")
+        print(f"Error Type: {type(e)}")
+        print(f"Error Details: {e}")
+        print("--- END DETAILED ERROR ---\n")
+        return "AI API Error: An unexpected error occurred. Check console."
 
 def simulate_live_stream(video_source: str | int, output_path: str | None = None, csv_path: str | None = None, fps: int = 30):
     # --- Anomaly Detection Model ---
@@ -170,10 +181,16 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
     # --- AI API Integration ---
     load_dotenv()
     api_key = os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("OPENAI_BASE_URL") # For NVIDIA or other custom endpoints
     ai_client = None
     if api_key:
-        print("OpenAI API key found. Initializing client.")
-        ai_client = OpenAI(api_key=api_key)
+        print("API key found. Initializing client.")
+        if base_url:
+            print(f"Using custom API endpoint: {base_url}")
+        ai_client = OpenAI(
+            api_key=api_key,
+            base_url=base_url  # Will be None if not set, which is the default
+        )
     else:
         print("WARNING: OPENAI_API_KEY not found in .env file. AI analysis will be disabled.")
 
@@ -229,7 +246,7 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
 
     # --- AI Alerting State ---
     ai_alert_cooldown = 0  # Frames to wait before next AI call
-    ai_alert_threshold = 0.6 # Score to trigger AI analysis
+    ai_alert_threshold = 0.4 # Score to trigger AI analysis
     last_ai_alert = "AI Analysis Standby"
 
 
@@ -445,7 +462,7 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
             # --- AI Alerting Logic ---
             if ai_client and ai_alert_cooldown == 0:
                 if scores.any() and scores[top_cell_idx] > ai_alert_threshold:
-                    print(f"High instability detected (Score: {scores[top_cell_idx]:.2f}). Triggering AI analysis...")
+                    print(f"Instability detected (Score: {scores[top_cell_idx]:.2f} > {ai_alert_threshold}). Triggering AI analysis...")
                     last_ai_alert = get_ai_analysis(
                         client=ai_client,
                         frame=frame,

@@ -7,6 +7,7 @@ streamlit>=1.28.0
 python-dotenv>=0.21.0
 pandas>=1.5.0
 requests>=2.31.0
+certifi>=2023.7.22
 # Optional: PyTorch required for forecasting trainer/predictor
 ultralytics>=8.0.0
 # Install if you plan to train models: `pip install torch` (check https://pytorch.org/)
