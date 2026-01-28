@@ -52,28 +52,26 @@ while True:
             suggestion_content = ""
 
             if "Alert:" in alert_text and "Suggestion:" in alert_text:
-                # Split the alert text by newline characters
-                lines = alert_text.split('\n')
-                # Ensure there are at least two lines before attempting to access lines[1]
-                if len(lines) >= 2:
-                    alert_content = lines[0].replace("Alert:", "").strip()
-                    suggestion_content = lines[1].replace("Suggestion:", "").strip()
-                else:
-                    # Handle cases where the expected multi-line format is not present
-                    alert_content = "Malformed AI response detected."
-                    suggestion_content = "Check AI output format."
+                # Filter out empty lines and find the specific lines for Alert and Suggestion
+                lines = [line for line in alert_text.split('\n') if line.strip()]
+                alert_line = next((line for line in lines if line.startswith("Alert:")), None)
+                suggestion_line = next((line for line in lines if line.startswith("Suggestion:")), None)
+
+                if alert_line and suggestion_line:
+                    alert_content = alert_line.replace("Alert:", "").strip()
+                    suggestion_content = suggestion_line.replace("Suggestion:", "").strip()
 
             # Clear previous state
             alert_placeholder.empty()
             suggestion_placeholder.empty()
 
-            if "Standby" in alert_text:
+            if alert_content and suggestion_content:
+                alert_placeholder.warning(f"**ALERT:** {alert_content}", icon="⚠️")
+                suggestion_placeholder.info(f"**Suggestion:** {suggestion_content}", icon="💡")
+            elif "Standby" in alert_text:
                 alert_placeholder.info(f"**Status:** {alert_text}", icon="⏳")
             elif "Error" in alert_text:
                 alert_placeholder.error(f"**Status:** {alert_text}", icon="🔥")
-            elif alert_content:
-                alert_placeholder.warning(f"**ALERT:** {alert_content}", icon="⚠️")
-                suggestion_placeholder.info(f"**Suggestion:** {suggestion_content}", icon="💡")
 
     except Exception as e:
         st.error(f"An error occurred: {e}")

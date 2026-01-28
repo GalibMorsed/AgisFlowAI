@@ -128,7 +128,7 @@ def get_ai_analysis(client: OpenAI, frame: np.ndarray, score: float, density: fl
     """
     try:
         response = client.chat.completions.create(
-            model="nvidia/nemotron-nano-12b-v2-vl:free", # A powerful vision-language model from NVIDIA
+            model="allenai/molmo-2-8b:free", # A powerful vision-language model from NVIDIA
             messages=[
                 {"role": "user", "content": [
                     {"type": "text", "text": prompt},
@@ -244,12 +244,12 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
     print("Initializing multi-object tracker...")
     tracker = MultiObjectTracker()
 
-    # --- AI Alerting State ---
-    ai_alert_cooldown = 0  # Frames to wait before next AI call
-    ai_alert_threshold = 0.4 # Score to trigger AI analysis
-    last_ai_alert = "AI Analysis Standby"
+    # --- AI Alerting State (initialized once) ---
+    ai_alert_cooldown = 0
+    ai_alert_threshold = 0.4
+    last_ai_alert = "AI Analysis Standby" # This will be updated and persist across loops
 
-
+    # --- Main Video Loop ---
     while True:
         # Open the video file
         cap = cv2.VideoCapture(video_source)
@@ -299,13 +299,11 @@ def simulate_live_stream(video_source: str | int, output_path: str | None = None
             if frame_idx % grid_update_interval == 1:
                 grid = create_adaptive_grid(frame.shape[:2], boxes, base_rows=6, base_cols=10, subdivide_threshold=3)
                 n_cells = len(grid)
-
-            # --- Vision Pipeline (Detection & Flow) ---
-            # Object Detection
-            # Get bounding boxes for every person in the frame.
-            boxes = detector.detect(frame, conf_thresh=0.25)
-
-            # --- Phase 5: Trajectory Projection ---
+                # If the number of cells changes, the history is no longer valid.
+                # Clear it to prevent IndexError when plotting.
+                if not metric_history['score'] or len(metric_history['score'][-1]) != n_cells:
+                    for key in metric_history:
+                        metric_history[key].clear()
             # Update tracker with new detections
             tracked_objects = tracker.update(boxes)
 
